@@ -1,0 +1,80 @@
+name: Deploy supermind.kz
+
+# supermind.kz: главная страница (этот репозиторий) + веб-версия приложения в /app/
+# и страницы политики, поддержки и удаления аккаунта — из свежего main репозитория kiray228/supermind.
+# Приложение пересобирается по расписанию, только если в kiray228/supermind появился новый коммит.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/20 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.seen.outputs.cache-hit == 'true' && github.event_name == 'schedule' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: site
+      - uses: actions/checkout@v4
+        with:
+          repository: kiray228/supermind
+          path: app-src
+      - id: sha
+        run: echo "sha=$(git -C app-src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: built.txt
+          key: app-${{ steps.sha.outputs.sha }}-${{ hashFiles('site/**') }}
+          lookup-only: true
+      - if: ${{ !(steps.seen.outputs.cache-hit == 'true' && github.event_name == 'schedule') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app-src/package-lock.json
+      - if: ${{ !(steps.seen.outputs.cache-hit == 'true' && github.event_name == 'schedule') }}
+        name: Сборка
+        run: |
+          cd app-src && npm ci && npm run build && cd ..
+          mkdir -p _site/app
+          cp -r app-src/dist/. _site/app/
+          # страницы для магазинов и поддержки — в корень supermind.kz
+          for f in privacy.html delete-account.html support.html legal.css icon-192.png icon-512.png icon.svg apple-touch-icon.png; do
+            cp "app-src/dist/$f" _site/
+          done
+          cp -r site/index.html site/site.css site/img _site/
+          echo "${{ steps.sha.outputs.sha }}" > built.txt
+      - if: ${{ !(steps.seen.outputs.cache-hit == 'true' && github.event_name == 'schedule') }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - if: ${{ !(steps.seen.outputs.cache-hit == 'true' && github.event_name == 'schedule') }}
+        uses: actions/cache/save@v4
+        with:
+          path: built.txt
+          key: app-${{ steps.sha.outputs.sha }}-${{ hashFiles('site/**') }}
+
+  deploy:
+    needs: build
+    if: ${{ needs.build.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
